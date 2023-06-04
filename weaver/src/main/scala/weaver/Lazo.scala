@@ -19,7 +19,7 @@ final case class Lazo[M, S](
   offences: Set[M], // offences detected
   latestF: Int,
   latestMessages: Set[M],
-  woSelfChild: Set[M], // messages without self child - which means it is either genesis of newly bonded
+  woSelfJ: Set[M], // messages without self parent - which means they are from newly bonded
   trustAssumption: LazoE[S] // bonds and other data from the state that is trusted by the node.
   // It us either local bonds file and others or data read from the LFS which node is bootstrapping from
 ) { self =>
@@ -71,7 +71,7 @@ final case class Lazo[M, S](
     val newSeenMap = seenMap -- dataToPrune + (id -> (m.seen -- dataToPrune))
     val newExeData = exeData + (fringeId -> ExeData(m.state.lazinessTolerance, m.state.bonds)) -- fringesToPrune
     val newLatestMessages = m.selfJOpt.foldLeft(latestMessages + id)(_ - _)
-    val newWoSelfChild = m.selfJOpt.fold(woSelfChild + id)(_ => woSelfChild) -- dataToPrune
+    val newWoSelfJ = m.selfJOpt.fold(woSelfJ + id)(_ => woSelfJ) -- dataToPrune
 
     val newLazo = copy(
       dagData = newDagData,
@@ -83,14 +83,14 @@ final case class Lazo[M, S](
       latestF = newLatestF,
       offences = newOffences,
       latestMessages = newLatestMessages,
-      woSelfChild = newWoSelfChild,
+      woSelfJ = newWoSelfJ,
       trustAssumption = trustAssumption
     )
 
     (newLazo, dataToPrune)
   }
 
-  lazy val mgjs: Set[M] = computeMGJS(latestMessages, (x: M, y: M) => seenMap.get(x).exists(_.contains(y)))
+  lazy val latestMGJs: Set[M] = computeMGJS(latestMessages, (x: M, y: M) => seenMap.get(x).exists(_.contains(y)))
 
   def contains(m: M): Boolean = dagData.contains(m)
 }
@@ -104,8 +104,6 @@ object Lazo {
     // data read from the final state associated with the final fringe
     def finalData(fringe: Set[M]): F[LazoE[S]]
   }
-
-  final case class FinalData[S](bondsMap: Bonds[S], lazinessTolerance: Int, expirationThreshold: Int)
 
   // Fringe index for messages that are declared as invalid due to offences that prevent to compute valid fringe
   val FRINGE_IDX_INVALID = Int.MinValue
@@ -141,7 +139,7 @@ object Lazo {
     latestF = F_ID_MIN - 1,
     offences = Set(),
     latestMessages = Set(),
-    woSelfChild = Set(),
+    woSelfJ = Set(),
     trustAssumption = initExeData
   )
 
@@ -181,7 +179,7 @@ object Lazo {
     m: LazoM[M, S],
     state: Lazo[M, S]
   ): Option[InvalidBasic] = {
-    val selfParentOpt = m.mgjs.find(state.dagData(_).sender == m.sender)
+    val selfParentOpt = m.selfJOpt(state)
     val latestFIdxOpt = state.lfIdxOpt(m.mgjs)
     val bondsMap = latestFIdxOpt.map(state.exeData(_).bondsMap).getOrElse(m.state.bonds)
     val justifications = computeFJS(

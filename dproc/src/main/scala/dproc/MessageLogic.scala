@@ -18,7 +18,7 @@ object MessageLogic {
   def computeFringe[F[_]: Sync, M, S](
     minGenJs: Set[M],
     lazo: Lazo[M, S]
-  ): F[LazoF[M]] = Sync[F].delay { Finality.find(minGenJs, lazo).getOrElse(lazo.lfUnsafe(minGenJs)) }
+  ): F[LazoF[M]] = Sync[F].delay { Finality.tryAdvance(minGenJs, lazo).getOrElse(lazo.latestFringe(minGenJs)) }
 
   def computeFsResolve[F[_]: Sync, M, S, T: Ordering](
     fFringe: Set[M],
@@ -117,7 +117,7 @@ object MessageLogic {
     state: Weaver[M, S, T],
     exeEngine: ExeEngine[F, M, S, T]
   ): F[Block[M, S, T]] = {
-    val mgjs = state.lazo.mgjs
+    val mgjs = state.lazo.latestMGJs
     val offences = state.lazo.offences
     for {
       lazoF <- computeFringe(mgjs, state.lazo)

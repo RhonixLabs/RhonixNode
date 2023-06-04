@@ -11,6 +11,7 @@ object Dependencies {
 
   val scalatest = "org.scalatest" %% "scalatest" % "3.2.15" % Test
   val scalatest_ce = "org.typelevel" %% "cats-effect-testing-scalatest" % "1.4.0" % Test
+  val scalacheck_e = "org.typelevel" %% "scalacheck-effect" % "1.0.4" % Test
 
-  val tests = Seq(scalatest, scalatest_ce)
+  val tests = Seq(scalatest, scalatest_ce, scalacheck_e)
 }

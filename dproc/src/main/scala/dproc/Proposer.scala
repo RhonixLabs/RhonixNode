@@ -68,7 +68,7 @@ object Proposer {
       // mark proposer idle
       val newCurSt = none[StateWithTxs[M, S, T]]
       // attempt to update mgjs
-      val mgjs = proposingOn.get.state.lazo.mgjs
+      val mgjs = proposingOn.get.state.lazo.latestMGJs
       val r = (mgjs, proposingOn.get.state.lazo.offences)
       copy(proposingOn = newCurSt, latest = newCurSt, awaitingPrev = mgjs.some) -> r
     }
@@ -101,7 +101,7 @@ object Proposer {
       }
 
       // stream updating the state of proposer, optionally triggering message creation
-      def attempt(newStWTx: StateWithTxs[M, S, T]) =
+      def attempt(newStWTx: StateWithTxs[M, S, T]): F[Unit] =
         stRef.modify(_.tryBegin(newStWTx)).flatMap(_.traverse(proposeQueue.send).void)
 
       new Proposer[F, M, S, T](sender, stRef, mintStream, attempt)

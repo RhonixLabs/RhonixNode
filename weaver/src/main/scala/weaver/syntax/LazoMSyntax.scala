@@ -15,14 +15,14 @@ final class LazoMOps[M, S](private val x: LazoM[M, S]) extends AnyVal {
 
   def selfJOpt(implicit state: Lazo[M, S]): Option[M] = state.selfJOpt(x.mgjs, x.sender)
 
-  def seen(implicit state: Lazo[M, S]): Set[M] = state.seen(x.mgjs)
+  def seen(implicit state: Lazo[M, S]): Set[M] = state.view(x.mgjs)
 
   def baseBonds(implicit state: Lazo[M, S]): Bonds[S] =
     state.bondsMap(x.mgjs).getOrElse(x.state.bonds)
 
   def lfIdx(implicit state: Lazo[M, S]): Option[Int] = state.lfIdxOpt(x.mgjs)
 
-  def computeExtended(state: Lazo[M, S]) = {
+  def computeExtended(state: Lazo[M, S]): LazoM.Extended[M, S] = {
     implicit val s = state
     LazoM.Extended(x, LazoMExt(fjs, selfJOpt, seen, baseBonds, lfIdx))
   }

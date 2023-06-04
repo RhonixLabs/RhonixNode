@@ -55,7 +55,7 @@ object Dag {
   def between[M](ceiling: Set[M], floor: Set[M], seen: M => Set[M]): Set[M] =
     ceiling.flatMap(seen) ++ ceiling -- floor.flatMap(seen)
 
-  def seenByAll[M](x: Set[M], seenMap: Map[M, Set[M]]) = x.map(seenMap).reduce(_ intersect _)
+  def seenByAll[M](x: Set[M], seenMap: Map[M, Set[M]]): Set[M] = x.map(seenMap).reduce(_ intersect _)
 //  def seenBySome[M](x: Set[M], seenMap: Map[M, Set[M]]) = x.flatMap(seenMap)
 //
 //  def inTheView[M](target: M, observers: Set[M], seenMap: Map[M, Set[M]]) =

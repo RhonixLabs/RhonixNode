@@ -3,51 +3,91 @@ package weaver.rules
 import cats.syntax.all._
 import weaver.Lazo
 import weaver.data.LazoF
+import weaver.rules.Dag.ceiling
+import weaver.syntax.all._
 
 object Finality {
 
-  def find[M, S](minGenJs: Set[M], lazo: Lazo[M, S]): Option[LazoF[M]] =
-    none[LazoF[M]] // TODO enable finalization advancement
+  def tryAdvance[M, S](minGenJs: Set[M], lazo: Lazo[M, S]): Option[LazoF[M]] =
+    simple[M, S](minGenJs: Set[M], lazo: Lazo[M, S])
 
-//  /** Messages that are available to constitute the new fringe. */
-//  def nextFringeTarget(
-//      view: Set[Int],
-//      curFringe: Set[Int],
-//      selfChildOpt: Int => Option[Int],
-//      selfParentOpt: Int => Option[Int],
-//      justificationsF: Int => Set[Int],
-//      isDescendant: (Int, Int) => Boolean,
-//      sender: Int => Int,
-//      offencesDetected: Set[Int]
-//  ): Set[Int] = {
-//    val childFringe = curFringe.map(selfChildOpt).flatten intersect view
-//    val ceilFringe  = ceiling(childFringe.map(justificationsF) + childFringe, isDescendant, sender)
-//    val validFringe = ceilFringe.map { x =>
-//      if (offencesDetected.contains(x)) {
-//        assert(
-//          selfParentOpt(x).isDefined,
-//          "Unexpected DAG. Invalid message does not have a valid parent."
-//        )
-//        selfParentOpt(x).get
-//      } else x
-//    }
-//    validFringe
-//  }
+  /** Synchronous version (not live if one node is faulty). */
+  private def simple[M, S](minGenJs: Set[M], lazo: Lazo[M, S]): Option[LazoF[M]] =
+    if (minGenJs.isEmpty) none[LazoF[M]]
+    else {
+      val view = lazo.view(minGenJs)
+      val bondsMap = lazo.bondsMapUnsafe(minGenJs)
+      val justifications = lazo.fullJs(bondsMap.activeSet)(minGenJs)
+      val baseFringe = lazo.latestFringe(minGenJs).fFringe
+      val selfChildOpt =
+        lazo.selfChildMap.get(_: M).flatten.filter(view.contains) // filter is mandatory to constrain the view
+      val selfParentOpt = lazo.dagData.get(_: M).flatMap(m => lazo.selfJOpt(minGenJs, m.sender))
+      val justificationsF = lazo.dagData.get(_: M).map(_.jss).get
+      val isDescendant = (x: M, y: M) => lazo.seenMap.get(x).exists(_.contains(y))
+      val sender = lazo.dagData.get(_: M).map(_.sender).get
+      val offencesDetected = lazo.offences
+      val seen = lazo.view
+      val targetFringe = nextFringeTarget[M, S](
+        baseFringe,
+        lazo.woSelfJ,
+        selfChildOpt,
+        selfParentOpt,
+        justificationsF,
+        isDescendant,
+        sender,
+        offencesDetected
+      )
+      val allAcross = targetFringe.map(sender) == bondsMap.activeSet
+      lazy val isSafe = targetFringe
+        .forall { x =>
+          bondsMap.isSuperMajority(
+            //            justifications.filter(y => seenAsValid(Set(y)).contains(x)).map(sender)
+            justifications.filter(y => seen(Set(y)).contains(x)).map(sender)
+          )
+        }
+      (allAcross && isSafe).guard[Option].as(LazoF(targetFringe))
+    }
+
+  /** Messages that are available to constitute the new fringe. */
+  private def nextFringeTarget[M, S](
+    curFringe: Set[M],
+    woSelfJ: Set[M],
+    selfChildOpt: M => Option[M],
+    selfParentOpt: M => Option[M],
+    justificationsF: M => Set[M],
+    isDescendant: (M, M) => Boolean,
+    sender: M => S,
+    offencesDetected: Set[M]
+  ): Set[M] = {
+    // TODO this is empty when fringe is empty. Need
+    val childFringe = curFringe.flatMap(selfChildOpt) ++ woSelfJ
+    val ceilFringe = ceiling(childFringe.map(justificationsF) + childFringe, isDescendant, sender)
+    val validFringe = ceilFringe.map { x =>
+      if (offencesDetected.contains(x)) {
+        assert(
+          selfParentOpt(x).isDefined,
+          "Unexpected DAG. Invalid message does not have a valid parent."
+        )
+        selfParentOpt(x).get
+      } else x
+    }
+    validFringe
+  }
 
 //  /** Find the next final fringe. Returns fringe advancement and whether  */
-//  def findFringeAdvancement(
-//      view: Set[Int],
-//      justifications: Set[Int],
-//      seenAsValid: Set[Int] => Set[Int],
-//      baseFringe: Set[Int],
-//      bondsMap: Bonds,
-//      selfChildOpt: Int => Option[Int],
-//      selfParentOpt: Int => Option[Int],
-//      sender: Int => Int,
-//      justificationsF: Int => Set[Int],
-//      isDescendant: (Int, Int) => Boolean,
-//      offencesDetected: Set[Int]
-//  ): Option[Set[Int]] = {
+//  def findFringeAdvancement[M, S](
+//    view: Set[M],
+//    justifications: Set[M],
+//    seenAsValid: Set[M] => Set[M],
+//    baseFringe: Set[M],
+//    bondsMap: Bonds[M],
+//    selfChildOpt: M => Option[M],
+//    selfParentOpt: M => Option[M],
+//    sender: M => M,
+//    justificationsF: M => Set[M],
+//    isDescendant: (M, M) => Boolean,
+//    offencesDetected: Set[M]
+//  ): Option[Set[M]] = {
 //    val targetFringe =
 //      nextFringeTarget(
 //        view,
@@ -133,7 +173,7 @@ object Finality {
 //      val curLvlPartition = curLvl.map(senderF)
 //      // find senders of the partition - those having a child for each item in curLvl
 //      val lvlPartition = children.map(_.map(senderF)).foldLeft(curLvlPartition) {
-//        case (acc, chSenders) => acc intersect chSenders.toSet
+//        case (acc, chSenders) => acc Mersect chSenders.toSet
 //      }
 //      // highest fringe containing senders of partition across is the next lvl
 //      children.map(_.filter(m => lvlPartition.contains(senderF(m)))).map(highestF)
@@ -186,7 +226,7 @@ object Finality {
 //  def computeFringes[M, S](mgjs: Set[M], lazo: Lazo[M, S]): LazoF[M] = {
 //    val isDescendant = (x: M, y: M) => lazo.seenMap.get(x).exists(_.contains(y))
 //    val latestFfOpt  = lazo.lfIdx(mgjs)
-//    val bonds        = latestFfOpt.map(lazo.exeData(_: Int).bondsMap).getOrElse(lazo.trustAssumption.bonds)
+//    val bonds        = latestFfOpt.map(lazo.exeData(_: M).bondsMap).getOrElse(lazo.trustAssumption.bonds)
 //    val latestLazoF =
 //      for {
 //        latestFf <- latestFfOpt.map(lazo.fringes)
@@ -205,7 +245,7 @@ object Finality {
 //      case Some(x @ LazoF(fF, _)) =>
 //        val target = (fF.flatMap(lazo.selfChildMap) ++
 //          (lazo.woSelfChild diff fF diff fF.flatMap(lazo.seenMap)))
-//          .filter(inTheView(_, mgjs, lazo.seenMap))
+//          .filter(MheView(_, mgjs, lazo.seenMap))
 //
 //        val pOpt = findSafeFull[M, S](
 //          bonds,
