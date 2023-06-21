@@ -1,0 +1,284 @@
+databaseChangeLog:
+  - changeSet:
+      id: create-db-schema
+      author: RhonixLabs
+      changes:
+        # Validator table
+        - createTable:
+            tableName: Validator
+            columns:
+              - column:
+                  name: id
+                  type: bigint
+                  autoIncrement: true
+                  constraints:
+                    primaryKey: true
+                    nullable: false
+              - column:
+                  name: publicKey
+                  type: varchar(32)
+                  constraints:
+                    unique: true
+                    nullable: false
+              - column:
+                  name: http
+                  type: varchar(255)
+                  constraints:
+                    nullable: false
+
+        # Unique index for Validator.publicKey
+        - createIndex:
+            columns:
+              - column:
+                  name: publicKey
+            tableName: Validator
+            unique: true
+
+        # Bond table
+        - createTable:
+            tableName: Bond
+            columns:
+              - column:
+                  name: id
+                  type: bigint
+                  autoIncrement: true
+                  constraints:
+                    primaryKey: true
+                    nullable: false
+              - column:
+                  name: validatorId
+                  type: bigint
+                  constraints:
+                    nullable: false
+                    # Bond.validatorId is foreign key for Validator.id
+                    foreignKeyName: fkBondValidator
+                    referencedTableName: Validator
+                    referencedColumnNames: id
+                    onUpdate: cascade
+                    onDelete: restrict
+              - column:
+                  name: stake
+                  type: bigint
+                  constraints:
+                    nullable: false
+
+        # Block table
+        - createTable:
+            tableName: Block
+            columns:
+              - column:
+                  name: id
+                  type: bigint
+                  autoIncrement: true
+                  constraints:
+                    primaryKey: true
+                    nullable: false
+              - column:
+                  name: hash
+                  type: varchar(32)
+                  constraints:
+                    unique: true
+                    nullable: false
+              - column:
+                  name: senderId
+                  type: bigint
+                  constraints:
+                    nullable: false
+                    # Block.senderId is foreign key for Validator.id
+                    foreignKeyName: fkBlockValidator
+                    referencedTableName: Validator
+                    referencedColumnNames: id
+                    onUpdate: cascade
+                    onDelete: restrict
+              - column:
+                  name: version
+                  type: int
+                  constraints:
+                    nullable: false
+              - column:
+                  name: shardId
+                  type: varchar(255)
+                  constraints:
+                    nullable: false
+              - column:
+                  name: seqNum
+                  type: bigint
+                  constraints:
+                    nullable: false
+              - column:
+                  name: number
+                  type: bigint
+                  constraints:
+                    nullable: false
+              - column:
+                  name: justificationsHash
+                  type: varchar(32)
+                  constraints:
+                    nullable: false
+              - column:
+                  name: bondsHash
+                  type: varchar(32)
+                  constraints:
+                    nullable: false
+              # Rholang (tuple space) state change
+              - column:
+                  name: preStateHash
+                  type: varchar(32)
+                  constraints:
+                    nullable: false
+              - column:
+                  name: postStateHash
+                  type: varchar(32)
+                  constraints:
+                    nullable: false
+              - column:
+                  name: deploysHash
+                  type: varchar(32)
+                  constraints:
+                    nullable: false
+              # Block signature
+              - column:
+                  name: signatureAlg
+                  type: varchar(255)
+                  constraints:
+                    nullable: false
+              - column:
+                  name: signature
+                  type: varchar(32)
+                  constraints:
+                    nullable: false
+              # Status
+              - column:
+                  name: status
+                  type: int
+                  constraints:
+                    nullable: false
+
+        # Unique index for Validator.publicKey
+        - createIndex:
+            columns:
+              - column:
+                  name: hash
+            tableName: Block
+            unique: true
+
+        # Deploy table
+        - createTable:
+            tableName: Deploy
+            columns:
+              - column:
+                  name: id
+                  type: bigint
+                  autoIncrement: true
+                  constraints:
+                    primaryKey: true
+                    nullable: false
+              - column:
+                  name: hash
+                  type: varchar(32)
+                  constraints:
+                    unique: true
+                    nullable: false
+              - column:
+                  name: publicKey
+                  type: varchar(32)
+                  constraints:
+                    nullable: false
+              - column:
+                  name: shardId
+                  type: varchar(255)
+                  constraints:
+                    nullable: false
+              - column:
+                  name: program
+                  type: text
+                  constraints:
+                    nullable: false
+              - column:
+                  name: phloPrice
+                  type: bigint
+                  constraints:
+                    nullable: false
+              - column:
+                  name: phloLimit
+                  type: bigint
+                  constraints:
+                    nullable: false
+              - column:
+                  name: timestamp
+                  type: datetime
+                  constraints:
+                    nullable: false
+              - column:
+                  name: validAfterBlockNumber
+                  type: bigint
+                  constraints:
+                    nullable: false
+
+        # Justifications table
+        - createTable:
+            tableName: Justifications
+            columns:
+              - column:
+                  name: id
+                  type: bigint
+                  autoIncrement: true
+                  constraints:
+                    primaryKey: true
+                    nullable: false
+              - column:
+                  name: validatorId
+                  type: bigint
+                  constraints:
+                    nullable: false
+                    # Justifications.validatorId is foreign key for Validator.id
+                    foreignKeyName: fkJustificationsValidator
+                    referencedTableName: Validator
+                    referencedColumnNames: id
+                    onUpdate: cascade
+                    onDelete: restrict
+              - column:
+                  name: latestBlockId
+                  type: bigint
+                  constraints:
+                    nullable: false
+                    # Justifications.latestBlockId is foreign key for Block.id
+                    foreignKeyName: fkJustificationsBlock
+                    referencedTableName: Block
+                    referencedColumnNames: id
+                    onUpdate: cascade
+                    onDelete: restrict
+
+        # Deploys table
+        - createTable:
+            tableName: Deploys
+            columns:
+              - column:
+                  name: id
+                  type: bigint
+                  autoIncrement: true
+                  constraints:
+                    primaryKey: true
+                    nullable: false
+              - column:
+                  name: blockId
+                  type: bigint
+                  constraints:
+                    nullable: false
+                    # Deploys.blockId is foreign key for Block.id
+                    foreignKeyName: fkDeploysBlock
+                    referencedTableName: Block
+                    referencedColumnNames: id
+                    onUpdate: cascade
+                    onDelete: restrict
+              - column:
+                  name: deployId
+                  type: bigint
+                  constraints:
+                    nullable: false
+                    # Deploys.deployId is foreign key for Deploy.id
+                    foreignKeyName: fkDeploysDeploy
+                    referencedTableName: Deploy
+                    referencedColumnNames: id
+                    onUpdate: cascade
+                    onDelete: restrict
