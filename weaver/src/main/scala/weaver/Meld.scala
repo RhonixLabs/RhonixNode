@@ -1,32 +1,37 @@
 package weaver
 
+import cats.effect.Sync
 import cats.kernel.Order
-import cats.syntax.all._
+import cats.syntax.all.*
 import weaver.data.{ConflictResolution, MeldM}
+import sdk.syntax.all.*
 
+import scala.collection.immutable.Map
 import scala.collection.mutable
 
-/** Meld is an addition to Lazo protocol that supports speculative execution / block merge. */
+/**
+ * Meld is an addition to Lazo protocol that supports speculative execution / block merge.
+ */
 final case class Meld[M, T](
   txsMap: Map[M, Set[T]],
   conflictsMap: Map[T, Set[T]], // Conflicts computed withing the Meld state
   dependentMap: Map[T, Set[T]], // Dependencies computed withing the Meld state
   finalized: Set[T],
-  rejected: Set[T]
+  rejected: Set[T],
 ) {
   def add(lazoId: M, m: MeldM[T], garbage: Set[M]): Meld[M, T] = {
-    val garbageT = garbage.flatMap(txsMap)
+    val garbageT        = garbage.flatMap(txsMap)
     val newConflictsMap = conflictsMap ++ m.conflictMap -- garbageT
     val newDependentMap = dependentMap ++ m.dependsMap -- garbageT
-    val newTxMap = txsMap + (lazoId -> m.txs.toSet) -- garbage
-    val newFinalized = finalized ++ m.finalized -- garbageT
-    val newRejected = rejected ++ m.rejected -- garbageT
+    val newTxMap        = txsMap + (lazoId -> m.txs.toSet) -- garbage
+    val newFinalized    = finalized ++ m.finalized -- garbageT
+    val newRejected     = rejected ++ m.rejected -- garbageT
     copy(
       conflictsMap = newConflictsMap,
       dependentMap = newDependentMap,
       txsMap = newTxMap,
       finalized = newFinalized,
-      rejected = newRejected
+      rejected = newRejected,
     )
   }
 }
@@ -35,8 +40,8 @@ object Meld {
 
   /** External functionality that Meld requires. */
   trait ExeEngine[F[_], T] {
-    def conflicts: (T, T) => F[Boolean]
-    def depends: (T, T) => F[Boolean]
+    def conflicts(l: T, r: T): F[Boolean]
+    def depends(x: T, on: T): F[Boolean]
   }
 
   def empty[M, T]: Meld[M, T] = Meld(
@@ -44,13 +49,14 @@ object Meld {
     Map.empty[T, Set[T]],
     Map.empty[T, Set[T]],
     Set.empty[T],
-    Set.empty[T]
+    Set.empty[T],
   )
 
   def resolve[M, T: Ordering](target: Set[M], meld: Meld[M, T]): ConflictResolution[T] = {
     val conflictSet = target.flatMap(meld.txsMap)
     // TODO mergeable channels
-    val r = resolveConflictSet[T, Int](
+//    println(s"conflictScope ${target}")
+    val r           = resolveConflictSet[T, Int](
       conflictSet,
       meld.finalized,
       meld.rejected,
@@ -58,7 +64,7 @@ object Meld {
       meld.conflictsMap,
       meld.dependentMap,
       Map(),
-      Map()
+      Map(),
     )
     ConflictResolution(r._1, r._2)
   }
@@ -80,7 +86,7 @@ object Meld {
     acceptedFinally: Set[D],
     rejectedFinally: Set[D],
     conflictsMap: Map[D, Set[D]],
-    dependencyMap: Map[D, Set[D]]
+    dependencyMap: Map[D, Set[D]],
   ): Set[D] =
     acceptedFinally.flatMap(conflictsMap.getOrElse(_, Set())) ++
       rejectedFinally.flatMap(dependencyMap.getOrElse(_, Set()))
@@ -97,7 +103,7 @@ object Meld {
   def computeRelationMap[D](directed: Boolean)(
     targetSet: Set[D],
     sourceSet: Set[D],
-    relation: (D, D) => Boolean
+    relation: (D, D) => Boolean,
   ): Map[D, Set[D]] =
     targetSet.iterator
       .flatMap(t => sourceSet.map((t, _)))
@@ -132,10 +138,10 @@ object Meld {
    */
   def computeGreedyNonIntersectingBranches[D: Ordering](
     target: Set[D],
-    dependencyMap: Map[D, Set[D]]
+    dependencyMap: Map[D, Set[D]],
   ): Seq[Set[D]] = {
     val concurrentRoots = computeBranches(target, dependencyMap)
-    val sorted =
+    val sorted          =
       concurrentRoots.toList.sortBy { case (k, v) => (-v.size, k) }.map { case (k, v) => v + k }
     partitionScope(sorted)
   }
@@ -145,20 +151,49 @@ object Meld {
     conflictSet: Set[D],
     finalSet: Set[D],
     conflicts: (D, D) => Boolean,
-    depends: (D, D) => Boolean
+    depends: (D, D) => Boolean,
   ): (Map[D, Set[D]], Map[D, Set[D]]) = {
-    val conflictsMap = computeConflictsMap(conflictSet, finalSet, conflicts) |+|
+    val conflictsMap  = computeConflictsMap(conflictSet, finalSet, conflicts) |+|
       computeConflictsMap(conflictSet, conflictSet, conflicts)
     val dependencyMap = computeDependencyMap(conflictSet, finalSet, depends) |+|
       computeDependencyMap(conflictSet, conflictSet, depends)
     (conflictsMap, dependencyMap)
   }
 
-  // TODO this is o(2^n) algorithm (see [[MergingBenchmarkSpec]]), another that scales should be developed instead
-  def computeRejectionOptions[D](conflictsMap: Map[D, Set[D]]): Set[Set[D]] = {
+  def computeRelationMaps[F[_]: Sync, T](
+    txs: List[T],                    // transactions executed in a message
+    unSeenTx: List[T],               // messages not seen by the message
+    conflictSet: List[T],            // conflict set observed by the message
+    conflicts: (T, T) => F[Boolean], // predicate of conflict
+    depends: (T, T) => F[Boolean],   // predicate of dependency
+  ): F[(Map[T, Set[T]], Map[T, Set[T]])] = {
+    def conflictMap(x: T, target: List[T]): F[Map[T, Set[T]]] = target.filterA(conflicts(x, _)).map { c =>
+      (c.iterator.map(_ -> Set(x)) ++ Iterator(x -> c.toSet)).toMap
+    }
+
+    def dependsMap(x: T, target: List[T]): F[Map[T, Set[T]]] = target.filterA(depends(x, _)).map { c =>
+      c.iterator.map(_ -> Set(x)).toMap
+    }
+
+    txs.foldLeftM((Map.empty[T, Set[T]], Map.empty[T, Set[T]])) { case ((accCM, accDM), t) =>
+      val cm = conflictMap(t, unSeenTx).map(_ |+| accCM)
+      val dm = dependsMap(t, conflictSet).map(_ |+| accDM)
+      (cm, dm).tupled
+    }
+  }
+
+  def computeRejectionOptions[D] = computeQuickRejectionOptions[D]
+
+  // anything that has conflict with something is rejected
+  def computeQuickRejectionOptions[D](conflictsMap: Map[D, Set[D]]): Set[Set[D]] = conflictsMap
+    .filter { case (_, v) => v.nonEmpty }
+    .keySet
+    .map(Set(_))
+
+  def computeBestRejectionOptions[D](conflictsMap: Map[D, Set[D]]): Set[Set[D]] = {
     def step(a: D, rjAcc: Set[D], acAcc: Set[D]): (Set[D], Set[D], Set[D]) = {
-      val newRjAcc = rjAcc ++ conflictsMap(a)
-      val newAcAcc = acAcc + a
+      val newRjAcc      = rjAcc ++ conflictsMap(a)
+      val newAcAcc      = acAcc + a
       val nextAcOptions = conflictsMap.keySet -- newRjAcc -- newAcAcc
       (nextAcOptions, newRjAcc, newAcAcc)
     }
@@ -169,14 +204,14 @@ object Meld {
         val (done, continue) = x
           .map((step _).tupled)
           .map { case (nextAccept, rjAcc, acAcc) =>
-            val n = nextAccept.map((_, rjAcc, acAcc))
+            val n    = nextAccept.map((_, rjAcc, acAcc))
             val done = n.isEmpty
             (n, done.guard[Option].as(rjAcc))
           }
           .partition { case (_, rjDone) => rjDone.isDefined }
-        val end = done.isEmpty && continue.isEmpty
-        val out = done.map(_._2.get)
-        val next = continue.flatMap(_._1)
+        val end              = done.isEmpty && continue.isEmpty
+        val out              = done.map(_._2.get)
+        val next             = continue.flatMap(_._1)
         (!end).guard[Option].as((out, next))
       }
       .flatten
@@ -186,7 +221,7 @@ object Meld {
   /** Compute optimal rejection according to the target function. */
   def computeOptimalRejection[D: Ordering](
     options: Set[Set[D]],
-    targetF: D => Long
+    targetF: D => Long,
   ): Set[D] = {
     implicit val ordD: Order[D] = Order.fromOrdering[D]
     options.toList
@@ -202,12 +237,12 @@ object Meld {
     dependencyMap: Map[D, Set[D]],
     rejectOptions: Set[Set[D]],
     initMergeableValues: Map[CH, Long],
-    mergeableDiffs: Map[D, Map[CH, Long]]
+    mergeableDiffs: Map[D, Map[CH, Long]],
   ): Set[Set[D]] = {
 
     def calMergedResult(
       deploy: D,
-      initMergeableValues: Map[CH, Long]
+      initMergeableValues: Map[CH, Long],
     ): Option[Map[CH, Long]] = {
       val diff = mergeableDiffs.getOrElse(deploy, Map())
       diff.foldLeft(initMergeableValues.some) { case (accOpt, (channel, change)) =>
@@ -230,10 +265,10 @@ object Meld {
     def foldRejection(
       baseBalance: Map[CH, Long],
       toMerge: Set[D],
-      dependencyMap: Map[D, Set[D]]
+      dependencyMap: Map[D, Set[D]],
     ): Set[D] = {
       val concurrentRoots = computeBranches(toMerge, dependencyMap).keysIterator.toList.sorted
-      val seq = concurrentRoots.map(traverseTree(_, dependencyMap.getOrElse(_: D, Set())))
+      val seq             = concurrentRoots.map(traverseTree(_, dependencyMap.getOrElse(_: D, Set())))
       // TODO come up with a better algorithm to solve below case
       // currently we are accumulating result from some order and reject the deploy once negative result happens
       // which doesn't seem perfect cases below
@@ -241,7 +276,7 @@ object Meld {
       // base result 10 and folding the result from order like [-10, -1, 20]
       // which on the second case `-1`, the calculation currently would reject it because the result turns
       // into negative.However, if you look at the all the item view 10 - 10 -1 + 20 is not negative
-      val (_, rejected) = seq.foldLeft((baseBalance, Set.empty[D])) { case ((balances, rejected), branch) =>
+      val (_, rejected)   = seq.foldLeft((baseBalance, Set.empty[D])) { case ((balances, rejected), branch) =>
         branch.foldLeft((balances, rejected)) { case ((balancesAcc, rejectedAcc), deploy) =>
           if (rejectedAcc.contains(deploy))
             (balancesAcc, rejectedAcc)
@@ -249,7 +284,7 @@ object Meld {
             calMergedResult(deploy, balancesAcc)
               .map((_, rejectedAcc))
               .getOrElse(
-                (balancesAcc, rejectedAcc ++ withDependencies(Set(deploy), dependencyMap))
+                (balancesAcc, rejectedAcc ++ withDependencies(Set(deploy), dependencyMap)),
               )
         }
       }
@@ -277,28 +312,28 @@ object Meld {
     dependencyMap: Map[D, Set[D]],
     // support for mergeable
     mergeableDiffs: Map[D, Map[CH, Long]],
-    initMergeableValues: Map[CH, Long]
+    initMergeableValues: Map[CH, Long],
   ): (Set[D], Set[D]) = {
-    val enforceRejected = withDependencies(
+    val enforceRejected                   = withDependencies(
       incompatibleWithFinal(acceptedFinally, rejectedFinally, conflictsMap, dependencyMap),
-      dependencyMap
+      dependencyMap,
     )
-    val conflictSetCompatible = conflictSet -- enforceRejected
+    val conflictSetCompatible             = conflictSet -- enforceRejected
     // conflict map accounting for dependencies
-    val fullConflictsMap =
+    val fullConflictsMap                  =
       conflictsMap.view.mapValues(vs => vs ++ withDependencies(vs, dependencyMap))
     // find rejection combinations possible
-    val rejectionOptions = computeRejectionOptions(fullConflictsMap.toMap)
+    val rejectionOptions                  = computeRejectionOptions(fullConflictsMap.toMap)
     // add to rejection options rejections caused by mergeable channels overflow
     val mergeableOverflowRejectionOptions = addMergeableOverflowRejections(
       conflictSet,
       dependencyMap,
       rejectionOptions,
       initMergeableValues,
-      mergeableDiffs
+      mergeableDiffs,
     )
     // find optimal rejection
-    val resolved = computeOptimalRejection(mergeableOverflowRejectionOptions, cost)
+    val resolved                          = computeOptimalRejection(mergeableOverflowRejectionOptions, cost)
     (conflictSetCompatible -- resolved, resolved ++ enforceRejected)
   }
 

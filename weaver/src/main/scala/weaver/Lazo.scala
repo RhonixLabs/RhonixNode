@@ -1,77 +1,91 @@
 package weaver
 
-import cats.syntax.all._
-import weaver.Lazo._
+import cats.syntax.all.*
+import sdk.syntax.all.*
+import weaver.Lazo.*
 import weaver.Offence.InvalidFringe
-import weaver.data._
-import weaver.rules.Dag._
-import weaver.rules._
-import weaver.syntax.all._
+import weaver.data.*
+import weaver.rules.Dag.*
+import weaver.rules.*
+import weaver.syntax.all.*
 
 /** State supporting Lazo protocol. */
 final case class Lazo[M, S](
-  dagData: Map[M, DagData[M, S]], // dag data
-  exeData: Map[Int, ExeData[S]], // execution data for all fringes
-  fringes: Map[Int, Set[M]], // all final fringes in the scope of Lazo
-  fringesR: Map[Set[M], Int], // all final fringes in the scope of Lazo
-  seenMap: Map[M, Set[M]], // all messages in the state seen by a message
+  dagData: Map[M, DagData[M, S]],  // dag data
+  exeData: Map[Int, ExeData[S]],   // execution data for all fringes
+  fringes: Map[Int, Set[M]],       // all final fringes in the scope of Lazo
+  fringesR: Map[Set[M], Int],      // all final fringes in the scope of Lazo
+  seenMap: Map[M, Set[M]],         // all messages in the state seen by a message
   selfChildMap: Map[M, Option[M]], // self child (if exists) for a message,
-  offences: Set[M], // offences detected
+  offences: Set[M],                // offences detected
   latestF: Int,
   latestMessages: Set[M],
-  woSelfChild: Set[M], // messages without self child - which means it is either genesis of newly bonded
-  trustAssumption: LazoE[S] // bonds and other data from the state that is trusted by the node.
+  woSelfJ: Set[M],                 // messages without self parent - which means they are from newly bonded
+  trustAssumption: LazoE[S],       // bonds and other data from the state that is trusted by the node.
   // It us either local bonds file and others or data read from the LFS which node is bootstrapping from
 ) { self =>
   override def equals(obj: Any): Boolean = obj match {
-    case x: Lazo[_, _] => x.latestMessages == this.latestMessages
+    case x: Lazo[?, ?] => x.latestMessages == this.latestMessages
     case _             => false
   }
 
   def add(
     id: M,
-    m: LazoM.Extended[M, S],
-    offenceOpt: Option[Offence]
+    m: LazoM.Extended[M, S], // TODO computation of seen should be done in this method, or `seen` truncation os required
+    offenceOpt: Option[Offence],
   ): (Lazo[M, S], Set[M]) = {
-
-    val fringeId = offenceOpt match {
+    val fringeId       = offenceOpt match {
       case Some(InvalidBasic())      => FRINGE_IDX_INVALID
       case Some(InvalidFringe(_, _)) => FRINGE_IDX_INVALID
-      case _ =>
-        val nextF = latestF + 1
+      case _                         =>
+        val nextF        = latestF + 1
         val nextFringeId = if (nextF == F_ID_MAX) F_ID_MIN else nextF
         fringesR.getOrElse(m.fringes.fFringe, nextFringeId)
     }
     val newFringeIdOpt = (fringeId != FRINGE_IDX_INVALID && !fringes.contains(fringeId))
       .guard[Option]
       .as(fringeId)
-    val newLatestF = newFringeIdOpt.getOrElse(latestF)
-    val newOffences = offenceOpt.fold(offences)(_ => offences + id)
+    val newLatestF     = newFringeIdOpt.getOrElse(latestF)
+
+    // Prev fringe seeing new fringe is impossible so signalling a bug in finalization
+    if (newFringeIdOpt.isDefined) {
+      val see = fringes(latestF).flatMap(seenMap) intersect m.lazoM.finality.fFringe
+
+      assert(
+        see.isEmpty,
+        s"\n$see \ncur ${fringes(latestF)} \n" +
+          s"new ${m.lazoM.finality.fFringe} \n" +
+          s"mgjs: \n ${m.lazoM.mgjs.map(x => x -> (dagData(x).fringeIdx -> fringes(dagData(x).fringeIdx))).toMap.mkString("\n ")}\n\n",
+      )
+    }
+    val newOffences                   = offenceOpt.fold(offences)(_ => offences + id)
     // Attempt to prune the state. Laziness tolerance is read from the latest fringe in the
     // state before message adding.
     val (dataToPrune, fringesToPrune) = newFringeIdOpt
       .flatMap(_ => m.lfIdx)
       .map(exeData(_).lazinessTolerance)
       .fold((Set.empty[M], Set.empty[Int]))(prune(this, latestF, _))
-    val newDagData = dagData + (id -> DagData(
+    val newDagData                    = dagData + (id -> DagData(
       m.mgj,
       m.fjs,
       m.offences,
       fringeId,
-      m.sender
+      m.sender,
     )) -- dataToPrune
-    val newFringes = newFringeIdOpt.fold(fringes)(fId => fringes + (fId -> m.fringes.fFringe)) -- fringesToPrune
-    val newFringesR = newFringeIdOpt.fold(fringesR)(fId => fringesR + (m.fringes.fFringe -> fId)) -- fringesToPrune
+    val newFringes                    = newFringeIdOpt.fold(fringes)(fId => fringes + (fId -> m.fringes.fFringe)) -- fringesToPrune
+    val newFringesR                   = newFringeIdOpt.fold(fringesR)(fId => fringesR + (m.fringes.fFringe -> fId)) -- fringesToPrune
       .map(fringes)
-    val newSelfChildMap = m.selfJOpt
+    val newSelfChildMap               = m.selfJOpt
       .map(sjId => selfChildMap + (id -> none[M]) + (sjId -> id.some))
       .getOrElse(selfChildMap + (id -> none[M])) -- dataToPrune
     // TODO would be good not tp prune each value in a seenMap. But this is not strictly correct because
     //  can lead to a cycle situation when old messages see ids that are assigned to new ones.
-    val newSeenMap = seenMap -- dataToPrune + (id -> (m.seen -- dataToPrune))
-    val newExeData = exeData + (fringeId -> ExeData(m.state.lazinessTolerance, m.state.bonds)) -- fringesToPrune
+    val mSeen                         = this.view(m.mgj)
+    val newSeenMap                    =
+      (seenMap + (id -> mSeen)).view.mapValues(_.filterNot(dataToPrune)).toMap -- dataToPrune
+    val newExeData        = exeData + (fringeId -> ExeData(m.state.lazinessTolerance, m.state.bonds)) -- fringesToPrune
     val newLatestMessages = m.selfJOpt.foldLeft(latestMessages + id)(_ - _)
-    val newWoSelfChild = m.selfJOpt.fold(woSelfChild + id)(_ => woSelfChild) -- dataToPrune
+    val newWoSelfJ        = m.selfJOpt.fold(woSelfJ + id)(_ => woSelfJ) -- dataToPrune
 
     val newLazo = copy(
       dagData = newDagData,
@@ -83,14 +97,14 @@ final case class Lazo[M, S](
       latestF = newLatestF,
       offences = newOffences,
       latestMessages = newLatestMessages,
-      woSelfChild = newWoSelfChild,
-      trustAssumption = trustAssumption
+      woSelfJ = newWoSelfJ,
+      trustAssumption = trustAssumption,
     )
 
     (newLazo, dataToPrune)
   }
 
-  lazy val mgjs: Set[M] = computeMGJS(latestMessages, (x: M, y: M) => seenMap.get(x).exists(_.contains(y)))
+  lazy val latestMGJs: Set[M] = computeMGJS(latestMessages, (x: M, y: M) => seenMap.get(x).exists(_.contains(y)))
 
   def contains(m: M): Boolean = dagData.contains(m)
 }
@@ -105,12 +119,10 @@ object Lazo {
     def finalData(fringe: Set[M]): F[LazoE[S]]
   }
 
-  final case class FinalData[S](bondsMap: Bonds[S], lazinessTolerance: Int, expirationThreshold: Int)
-
   // Fringe index for messages that are declared as invalid due to offences that prevent to compute valid fringe
   val FRINGE_IDX_INVALID = Int.MinValue
-  val F_ID_MIN = Int.MinValue + 1
-  val F_ID_MAX = Int.MaxValue
+  val F_ID_MIN           = Int.MinValue + 1
+  val F_ID_MAX           = Int.MaxValue
 
   /**
    * DAG data about the message.
@@ -125,7 +137,7 @@ object Lazo {
     jss: Set[M],
     offences: Set[M],
     fringeIdx: Int,
-    sender: S
+    sender: S,
   )
 
   /** Data required for the protocol that should be provided by the execution engine. */
@@ -134,65 +146,88 @@ object Lazo {
   def empty[M, S](initExeData: LazoE[S]): Lazo[M, S] = new Lazo(
     dagData = Map.empty[M, DagData[M, S]],
     exeData = Map.empty[Int, ExeData[S]],
-    fringes = Map.empty[Int, Set[M]],
+    fringes = Map(F_ID_MIN - 1 -> Set()),
     fringesR = Map.empty[Set[M], Int],
     seenMap = Map.empty[M, Set[M]],
     selfChildMap = Map.empty[M, Option[M]],
     latestF = F_ID_MIN - 1,
     offences = Set(),
     latestMessages = Set(),
-    woSelfChild = Set(),
-    trustAssumption = initExeData
+    woSelfJ = Set(),
+    trustAssumption = initExeData,
   )
+
+//  /** Prune the state upon finding the new fringe. */
+//  def prune[M, S](
+//    state: Lazo[M, S],
+//    latestFringeIdx: Int,
+//    lazinessTolerance: Int,
+//  ): (Set[M], Set[Int]) =
+//    if (latestFringeIdx > F_ID_MIN + lazinessTolerance) {
+//      // Pruned state won't be able to process any message with fringe below prune fringe.
+//      val pruneFringeIdx = latestFringeIdx - lazinessTolerance
+//      val dataToPrune    = state.fringes(pruneFringeIdx).flatMap(state.seenMap)
+//      val fringesToPrune = state.fringes.collect { case (i, _) if i < pruneFringeIdx => i }
+//      (dataToPrune, fringesToPrune.toSet)
+//    } else Set.empty[M] -> Set.empty[Int]
 
   /** Prune the state upon finding the new fringe. */
   def prune[M, S](
     state: Lazo[M, S],
     latestFringeIdx: Int,
-    lazinessTolerance: Int
-  ): (Set[M], Set[Int]) =
-    if (latestFringeIdx > F_ID_MIN + lazinessTolerance) {
+    lazinessTolerance: Int,
+  ): (Set[M], Set[Int]) = {
+    val latestFringe   = state.fringes(latestFringeIdx)
+    val pruneFringeIdx =
+      latestFringe.flatMap(state.selfChildMap).map(state.dagData(_).fringeIdx).minOption.getOrElse(F_ID_MIN)
+
+    if (pruneFringeIdx > F_ID_MIN + lazinessTolerance) {
       // Pruned state won't be able to process any message with fringe below prune fringe.
       val pruneFringeIdx = latestFringeIdx - lazinessTolerance
-      val dataToPrune = state.fringes(pruneFringeIdx).flatMap(state.seenMap)
+      val dataToPrune    = state.fringes(pruneFringeIdx).flatMap(state.seenMap)
       val fringesToPrune = state.fringes.collect { case (i, _) if i < pruneFringeIdx => i }
       (dataToPrune, fringesToPrune.toSet)
     } else Set.empty[M] -> Set.empty[Int]
+  }
 
   /** Whether message can be added to the state. */
   def canAdd[M, S](minGenJs: Set[M], sender: S, state: Lazo[M, S]): Boolean = {
     // whether all justifications are in the state
-    val jsProcessed = minGenJs.forall(state.dagData.contains)
+    val jsProcessed          = minGenJs.forall(state.dagData.contains)
     // genesis case
-    lazy val genesisCase = minGenJs.isEmpty && state.fringes.isEmpty
+    lazy val genesisCase     = minGenJs.isEmpty && state.fringes.isEmpty
+    // if state is pruned there might be not enough data to process the message anymore
+    // exeData should not be pruned, so it can be used to check final data for all mgjs
+    // TODO this is not pretty
+    val exeNotPruned         = minGenJs.map(state.dagData).forall(x => state.fringes.contains(x.fringeIdx))
     // if an offender is detected in the view - there should not be any future message added;
     // this is necessary to meet the frugality basic rule.
     lazy val notFromOffender = {
-      val selfJs = state.selfJOpt(minGenJs, sender)
+      val selfJs             = state.selfJOpt(minGenJs, sender)
       val notFromEquivocator = selfJs.size <= 1
       lazy val selfJsIsValid = selfJs.forall(!state.offences.contains(_))
       notFromEquivocator && selfJsIsValid
     }
-    (jsProcessed && notFromOffender) || genesisCase
+    (jsProcessed && exeNotPruned && notFromOffender) || genesisCase
   }
 
   /** Validate message for basic rules against the state. */
   def checkBasicRules[M, S](
     m: LazoM[M, S],
-    state: Lazo[M, S]
+    state: Lazo[M, S],
   ): Option[InvalidBasic] = {
-    val selfParentOpt = m.mgjs.find(state.dagData(_).sender == m.sender)
-    val latestFIdxOpt = state.lfIdxOpt(m.mgjs)
-    val bondsMap = latestFIdxOpt.map(state.exeData(_).bondsMap).getOrElse(m.state.bonds)
+    val selfParentOpt  = m.selfJOpt(state)
+    val latestFIdxOpt  = state.lfIdxOpt(m.mgjs)
+    val bondsMap       = latestFIdxOpt.map(state.exeData(_).bondsMap).getOrElse(m.state.bonds)
     val justifications = computeFJS(
       m.mgjs,
       bondsMap.activeSet,
       state.dagData(_: M).jss,
       (x: M, y: M) => state.seenMap.get(x).exists(_.contains(y)),
-      state.dagData(_: M).sender
+      state.dagData(_: M).sender,
     )
-    val seen = (target: M) => m.mgjs.exists(state.seenMap(_).contains(target))
-    val senderF = state.dagData(_: M).sender
+    val seen           = (target: M) => m.mgjs.exists(state.seenMap(_).contains(target))
+    val senderF        = state.dagData(_: M).sender
     Basic
       .validate(
         justifications,
@@ -201,7 +236,7 @@ object Lazo {
         selfParentOpt.map(state.dagData(_).offences).getOrElse(Set()),
         justifications.map(j => j -> state.dagData(j).offences).toMap,
         senderF,
-        seen
+        seen,
       )
       .toOption
   }

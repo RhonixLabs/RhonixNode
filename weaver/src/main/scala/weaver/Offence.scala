@@ -1,5 +1,7 @@
 package weaver
 
+import weaver.data.ConflictResolution
+
 trait Offence
 
 object Offence {
@@ -8,7 +10,7 @@ object Offence {
   final case class InvalidFringe[M](shouldBe: Set[M], is: Set[M]) extends Offence
 
   // Message computes invalid conflict resolution.
-  final case class InvalidFringeResolve[T](invAccept: Set[T]) extends Offence
+  final case class InvalidFringeResolve[T](shouldBe: ConflictResolution[T], is: ConflictResolution[T]) extends Offence
 
   // Message computes invalid final state for the fringe.
   final case class InvalidFringeState() extends Offence
