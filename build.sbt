@@ -31,8 +31,14 @@ lazy val sdk = (project in file("sdk"))
 //  .settings(settingsScala3*) // Not supported in IntelliJ Scala plugin
   .settings(settingsScala2*)
   .settings(
-    libraryDependencies ++= Seq(catsCore, catsEffect, fs2Core) ++ tests,
+    libraryDependencies ++= Seq(catsCore, catsEffect, fs2Core) ++ dbLibs ++ tests,
   )
+
+// Database interfaces implementation
+lazy val db = (project in file("db"))
+  .settings(settingsScala2*)
+  .settings(libraryDependencies ++= Seq(catsCore, catsEffect) ++ dbLibs ++ tests)
+  .dependsOn(sdk)
 
 // Consensus
 lazy val weaver = (project in file("weaver"))
@@ -57,6 +63,7 @@ lazy val node = (project in file("node"))
 //  .settings(settingsScala3*) // Not supported in IntelliJ Scala plugin
   .settings(settingsScala2*)
   .settings(
-    libraryDependencies ++= Seq(catsCore, catsEffect, protobuf, grpc, grpcNetty) ++ tests,
+    libraryDependencies ++= Seq(catsCore, catsEffect, protobuf, grpc, grpcNetty) ++ dbLibs ++ tests,
+    Compile / unmanagedResourceDirectories += baseDirectory.value / ".." / "db" / "src" / "main" / "scala" / "resources",
   )
-  .dependsOn(sdk, weaver, dproc)
+  .dependsOn(sdk, weaver, dproc, db)
