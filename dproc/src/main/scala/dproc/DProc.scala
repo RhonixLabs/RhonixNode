@@ -2,141 +2,152 @@ package dproc
 
 import cats.effect.Ref
 import cats.effect.kernel.Async
+import cats.effect.std.{Mutex, Queue}
 import cats.syntax.all.*
+import dproc.WeaverNode.*
 import dproc.data.Block
-import fs2.concurrent.Channel
-import fs2.{Pipe, Stream}
+import fs2.Stream
 import sdk.DagCausalQueue
+import sdk.node.{Processor, Proposer}
+import weaver.Weaver
 import weaver.Weaver.ExeEngine
-import weaver.*
-import weaver.data.*
+import weaver.data.ConflictResolution
+import sdk.syntax.all.*
 
 /**
-  * Instance of an observer process.
-  *
-  * @param stateRef Ref holding the process state
-  * @param gcStream stream of message that are garbage collected
-  * @param finStream stream of finalized transactions
-  * @param acceptMsg callback to make the process accept the block
+  * Process of an distributed computer.
   * @tparam F effect type
   */
-final case class DProc[F[_], M, S, T](
-  stateRef: Ref[F, Weaver[M, S, T]],           // state of the process - all data supporting the protocol
-  ppStateRef: Option[Ref[F, sdk.Proposer]],    // state of the proposer
-  pcStateRef: Ref[F, Processor.ST[M]],         // state of the message processor
+final case class DProc[F[_], M, T](
   dProcStream: Stream[F, Unit],                // main stream that launches the process
-  output: Stream[F, Block.WithId[M, S, T]],    // stream of output messages
+  // state
+  ppStateRef: Option[Ref[F, Proposer.ST]],     // state of the proposer
+  pcStateRef: Ref[F, Processor.ST[M]],         // state of the processor
+  // outputs
+  output: Stream[F, M],                        // stream of messages added to the state
   gcStream: Stream[F, Set[M]],                 // stream of messages garbage collected
   finStream: Stream[F, ConflictResolution[T]], // stream of finalized transactions
-  acceptMsg: Block.WithId[M, S, T] => F[Unit], // callback to make process accept received block
+  // inputs transactions and blocks has to be stored before sending to dProc, these callbacks accept only ids
+  acceptMsg: M => F[Unit],                     // callback to make process accept received block
   acceptTx: T => F[Unit],                      // callback to make the process accept transaction
 )
 
 object DProc {
 
-  final case class WithId[F[_], Id, M, S, T](id: Id, p: DProc[F, M, S, T])
-
-  final private case class StateWithTxs[M, S, T](state: Weaver[M, S, T], txs: Iterable[T])
-
-  def connect[F[_]: Async, M, S, T](
-    dProc: DProc[F, M, S, T],
-    broadcast: Pipe[F, Block.WithId[M, S, T], Unit],
-    finalized: Pipe[F, ConflictResolution[T], Unit],
-    pruned: Pipe[F, Set[M], Unit],
-  ): Stream[F, Unit] =
-    dProc.dProcStream
-      .concurrently(dProc.output.through(broadcast))
-      .concurrently(dProc.finStream.through(finalized))
-      .concurrently(dProc.gcStream.through(pruned))
-
-  @SuppressWarnings(Array("org.wartremover.warts.ListAppend"))
   def apply[F[_]: Async, M, S, T: Ordering](
+    // states
+    weaverStRef: Ref[F, Weaver[M, S, T]],    // weaver
+    proposerStRef: Ref[F, Proposer.ST],      // proposer
+    processorStRef: Ref[F, Processor.ST[M]], // processor
+    readTxs: => F[Set[T]],                   // tx pool
+    bufferStRef: Ref[F, DagCausalQueue[M]],  // buffer
+    // id of the process if node is supposed to propose
     idOpt: Option[S],
-    initPool: List[T],
-    initState: Weaver[M, S, T],
+    // execution engine
     exeEngine: ExeEngine[F, M, S, T],
+    // id generator for a block created
     idGen: Block[M, S, T] => F[M],
-    // DProc assumes that blocks are received in full and stored. Retrieval is out of scope
-    getBlock: M => Block.WithId[M, S, T],
-  ): F[DProc[F, M, S, T]] =
+    // save block to persistent storage
+    saveBlock: Block.WithId[M, S, T] => F[Unit],
+    loadBlock: M => F[Block.WithId[M, S, T]],
+  ): F[DProc[F, M, T]] =
     for {
-      // channel for incoming blocks, some load balancing can be applied by modifying this queue
-      bQ          <- Channel.unbounded[F, Block.WithId[M, S, T]]
-      // channel for incoming user signed transactions
-      tQ          <- Channel.unbounded[F, T]
+      // channel for incoming transactions
+      txQ <- Queue.unbounded[F, T]
+      // channel for inbound messages
+      inQ <- Queue.unbounded[F, M]
       // channel for outbound messages
-      oQ          <- Channel.unbounded[F, Block.WithId[M, S, T]]
+      oQ  <- Queue.unbounded[F, M]
       // channel for garbage collect
-      gcQ         <- Channel.unbounded[F, Set[M]]
+      gcQ <- Queue.unbounded[F, Set[M]]
       // channel for finalization results
-      fQ          <- Channel.unbounded[F, ConflictResolution[T]]
-      // states
-      stRef       <- Ref[F].of(initState)
-      plRef       <- Ref[F].of(initPool)
-      proposerRef <- Ref[F].of(sdk.Proposer.default)
-      // message processor
-      concurrency  = 1000 // TODO CONFIG
-      processor   <- Processor(stRef, exeEngine, concurrency)
-      bufferStRef <- Ref[F].of(DagCausalQueue.default[M])
+      fQ  <- Queue.unbounded[F, ConflictResolution[T]]
+      x   <- procWithTrig(
+               weaverStRef,
+               exeEngine,
+               processorStRef,
+               loadBlock,
+             )
+      y   <- propWithTrig(
+               idOpt,
+               proposerStRef,
+               weaverStRef,
+               readTxs,
+               exeEngine,
+               idGen,
+             )
+
+      (addedStream, triggerProcessing)  = x
+      (proposeStream, triggerProposing) = y
+      // lock to protect read of missing dependencies until they are recorded to buffer
+      misDepReadMutex                  <- Mutex[F]
     } yield {
-      val bufferAdd      = (m: M, d: Set[M]) =>
-        bufferStRef.modify(_.enqueue(m, d).dequeue).flatMap(_.toList.traverse(x => processor.accept(getBlock(x))))
-      val bufferComplete = (x: M) =>
-        bufferStRef
-          .modify { s =>
-            val (newS, success) = s.satisfy(x)
-            if (success) s.dequeue else newS -> Set()
-          }
-          .flatMap(_.toList.traverse(x => processor.accept(getBlock(x))))
 
-      def proposeF(s: StateWithTxs[M, S, T]): F[Unit] = idOpt
-        .map { sender =>
-          for {
-            // make message
-            m <- MessageLogic.createMessage[F, M, S, T](s.txs.toList, sender, s.state, exeEngine)
-            // assign ID
-            b <- idGen(m).map(id => Block.WithId(id, m))
-            // send to processing queue
-            _ <- bQ.send(b)
-          } yield ()
-        }
-        .getOrElse(Async[F].unit)
+      val effects = new NodeFlow.Effects[F, M, S, T, AddEffect[M, T], Block.WithId[M, S, T]] {
+        override def bufferIncoming(m: M): F[Unit] = for {
+          b    <- loadBlock(m)
+          next <- misDepReadMutex.lock.use(_ =>
+                    weaverStRef.get
+                      .map(w => (b.m.minGenJs ++ b.m.offences).filterNot(w.lazo.contains))
+                      .flatMap(missing => bufferStRef.modify(_.enqueue(b.id, missing).dequeue)),
+                  )
+//          // this is required in case between computation of missing dependencies
+//          // and call on a buffer state another update happen that moves some dependency moved from
+//          // buffer to weaver.
+//          toSatisfy <- weaverStRef.get.map(w => missing.filter(w.lazo.contains))
+//          next      <- bufferStRef.modify(s => toSatisfy.foldLeft(s) { case (acc, i) => acc.satisfy(i)._1 }.dequeue)
+          _    <- next.toList.traverse(triggerProcessing)
+        } yield ()
 
-      // steam of incoming messages
-      val receive = bQ.stream.evalMap(b => bufferAdd(b.id, b.m.minGenJs ++ b.m.offences))
-      // stream of incoming tx
-      val tS      = tQ.stream.evalTap(t => plRef.update(t +: _))
-      val process = {
-        // stream of states after new message processed.
-        val afterAdded   = processor.results.evalMap { case (id, r) =>
-          // send garbage and new finality detected (if any), notify buffer
-          gcQ.send(r.garbage) >> r.finality.traverse(fQ.send) >> bufferComplete(id) >>
-            // load transactions from pool and tuple the resulting state with it
-            plRef.get.map(r.newState -> _)
-        }
-        // stream of states after new transaction received
-        val afterNewTx   = tS
-          .fold(initPool) { case (pool, tx) => pool :+ tx }
-          .evalMap(newPool => stRef.get.map(_ -> newPool))
-        // stream of states that the process should act on
-        val statesStream = afterAdded.merge(afterNewTx).map { case (st, txs) => StateWithTxs(st, txs) }
+        override def added(m: M, r: AddEffect[M, T]): F[Unit] = for {
+          selfBlock <- idOpt.traverse(id => loadBlock(m).map(_.m.sender).map(_ == id)).map(_.getOrElse(false))
+          _         <- new Exception(s"Validation of a self block failed ${r.offenceOpt}").raiseError
+                         .whenA(r.offenceOpt.nonEmpty && selfBlock)
+          // notify processor
+          _         <- processorStRef.update(_.done(m))
 
-        // make an attempt to propose after each message added
-        statesStream.evalTap(sWt => proposerRef.modify(_.start).map(proposeF(sWt).whenA(_)))
+          // notify proposer
+          selfBlock <- idOpt.traverse(self => loadBlock(m).map(_.m.sender == self)).map(_.getOrElse(false))
+          _         <- proposerStRef.modify(_.done).whenA(selfBlock)
+
+          // notify buffer, get next
+          next <- misDepReadMutex.lock.use(_ => bufferStRef.modify(_.satisfy(m)._1.dequeue))
+          _    <- next.toList.traverse_(triggerProcessing)
+
+          // send output
+          _ <- oQ.offer(m)
+          _ <- gcQ.offer(r.garbage)
+          _ <- r.finalityOpt.traverse_(fQ.offer)
+        } yield ()
+
+        override def store(b: Block.WithId[M, S, T]): F[Unit] = saveBlock(b)
+
+        override def triggerProcess(m: M): F[Unit] = triggerProcessing(m)
+
+        override def triggerPropose: F[Unit] = triggerProposing
       }
 
-      val stream = process.void.concurrently(receive)
+      val input    = Stream.fromQueueUnterminated(inQ)
+      val txStream = Stream.fromQueueUnterminated(txQ)
 
-      new DProc[F, M, S, T](
-        stRef,
-        idOpt.map(_ => proposerRef),
-        processor.stRef,
-        stream,
-        oQ.stream,
-        gcQ.stream,
-        fQ.stream,
-        bQ.send(_).void,
-        tQ.send(_).void,
+      val s = dproc.NodeFlow[F, M, S, T, AddEffect[M, T], Block.WithId[M, S, T]](
+        input,
+        addedStream,
+        txStream,
+        proposeStream,
+        effects,
+        _.id,
+      )
+
+      new DProc[F, M, T](
+        s,
+        idOpt.map(_ => proposerStRef),
+        processorStRef,
+        Stream.fromQueueUnterminated(oQ),
+        Stream.fromQueueUnterminated(gcQ),
+        Stream.fromQueueUnterminated(fQ),
+        inQ.offer,
+        txQ.offer,
       )
     }
 }

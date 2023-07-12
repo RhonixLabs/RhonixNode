@@ -14,8 +14,11 @@ object Dependencies {
   val protobuf = "com.google.protobuf" % "protobuf-java" % "3.22.2"
 
   // Testing frameworks
-  val scalatest    = "org.scalatest" %% "scalatest"                     % "3.2.15" % Test // cross CrossVersion.for3Use2_13
-  val scalatest_ce = "org.typelevel" %% "cats-effect-testing-scalatest" % "1.4.0"  % Test // cross CrossVersion.for3Use2_13
+  val scalatest    = "org.scalatest" %% "scalatest" % "3.2.15" % Test // cross CrossVersion.for3Use2_13
+  val scalatest_ce =
+    "org.typelevel" %% "cats-effect-testing-scalatest" % "1.4.0" % Test // cross CrossVersion.for3Use2_13
+  val mockito      = "org.mockito"   %% "mockito-scala-cats" % "1.17.12" % Test
+  val scalacheck_e = "org.typelevel" %% "scalacheck-effect"  % "1.0.4"   % Test
 
-  val tests = Seq(scalatest, scalatest_ce)
+  val tests = Seq(scalatest, scalatest_ce, mockito, scalacheck_e)
 }

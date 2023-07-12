@@ -1,11 +1,11 @@
 package weaver
 
-import cats.syntax.all._
+import cats.syntax.all.*
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
-import weaver.rules.Basic._
-import weaver.rules.Dag._
-import weaver.rules._
+import weaver.rules.Basic.*
+import weaver.rules.*
+import weaver.rules.Dag.computeFJS
 
 import scala.annotation.tailrec
 
@@ -13,7 +13,7 @@ class LazoBasicSpec extends AnyFlatSpec with Matchers {
 
   "unambiguity violation" should "be detected" in {
     val eqs = Map(0 -> 10, 1 -> 10) // sender 10 equivocates by sending 0 and 1
-    val ok = Map(2 -> 11, 3 -> 12) // sender do not equivocate
+    val ok  = Map(2 -> 11, 3 -> 12) // sender do not equivocate
     val all = eqs ++ ok
     unambiguity(eqs.keySet, all.keySet, all) shouldBe none[Offence]
     unambiguity(Set(), all.keySet, all) shouldBe InvalidUnambiguity(Map(10 -> Set(0, 1))).some
@@ -22,15 +22,15 @@ class LazoBasicSpec extends AnyFlatSpec with Matchers {
 
   "continuity violation" should "be detected" in {
     val selfJsMgjs = Set(0, 1, 2, 3)
-    val seen = selfJsMgjs.map(_ -> true).toMap
+    val seen       = selfJsMgjs.map(_ -> true).toMap
     continuity(seen, selfJsMgjs) shouldBe none[Offence]
     continuity(seen + (0 -> false), selfJsMgjs) shouldBe InvalidContinuity(Set(0)).some
   }
 
   "frugality violation" should "be detected" in {
     val prevOffences = Map(4 -> 10)
-    val jssWrong = Map(0 -> 10, 1 -> 11, 2 -> 12)
-    val jssGood = Map(1 -> 11, 2 -> 12)
+    val jssWrong     = Map(0 -> 10, 1 -> 11, 2 -> 12)
+    val jssGood      = Map(1 -> 11, 2 -> 12)
     frugality(jssGood.keySet, prevOffences.keySet, jssGood ++ prevOffences) shouldBe none[Offence]
     frugality(jssWrong.keySet, prevOffences.keySet, jssWrong ++ prevOffences) shouldBe
       InvalidFrugality(Set(0)).some
@@ -79,15 +79,15 @@ class LazoBasicSpec extends AnyFlatSpec with Matchers {
   }
 
   "Full justifications" should "be computed correctly in when bonding happens" in {
-    val target = Set(2)
-    val jss = Map(2 -> Set(1), 1 -> Set(0), 0 -> Set.empty[Int])
+    val target      = Set(2)
+    val jss         = Map(2 -> Set(1), 1 -> Set(0), 0 -> Set.empty[Int])
     val ancestorMap = jss.keys.map(k => k -> seen[Int](k, jss)).toMap
-    val isAncestor = (x: Int, y: Int) => ancestorMap.get(x).exists(_.contains(y))
-    val bonded = Set(1, 2, 3, 4, 5) // 5 senders bonded
-    val senderF = Map(0 -> 1) // genesis created by sender 1
-    val computed = computeFJS(target, bonded, jss, isAncestor, senderF)
+    val isAncestor  = (x: Int, y: Int) => ancestorMap.get(x).exists(_.contains(y))
+    val bonded      = Set(1, 2, 3, 4, 5) // 5 senders bonded
+    val senderF     = Map(0 -> 1)        // genesis created by sender 1
+    val computed    = computeFJS(target, bonded, jss, isAncestor, senderF)
     // latest message is the same for each bonded sender ()
-    val ref = Map(5 -> 0, 1 -> 0, 2 -> 0, 3 -> 0, 4 -> 0)
+    val ref         = Map(5 -> 0, 1 -> 0, 2 -> 0, 3 -> 0, 4 -> 0)
     computed shouldBe ref.values
   }
 }
